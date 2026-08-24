@@ -2,6 +2,27 @@ let cachedToken = null;
 let cachedTokenExpiresAt = 0;
 
 export default async function handler(req, res) {
+  // Allow requests only from The Highland Mint storefront
+  const allowedOrigins = [
+    "https://www.highlandmint.com",
+    "https://highlandmint.com"
+  ];
+
+  const origin = req.headers.origin;
+
+  if (allowedOrigins.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
+
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  // Browser CORS preflight
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
+  }
+
   // Only allow POST requests
   if (req.method !== "POST") {
     return res.status(405).json({
