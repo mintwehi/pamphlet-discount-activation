@@ -1,3 +1,6 @@
+let cachedToken = null;
+let cachedTokenExpiresAt = 0;
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
@@ -10,14 +13,22 @@ export default async function handler(req, res) {
   }
 
   const shop = process.env.SHOPIFY_STORE_DOMAIN;
-  const token = process.env.SHOPIFY_ACCESS_TOKEN;
+  const clientId = process.env.SHOPIFY_CLIENT_ID;
+  const clientSecret = process.env.SHOPIFY_CLIENT_SECRET;
 
-  if (!shop || !token) {
-    return res.status(500).json({ error: "Server configuration is incomplete" });
+  if (!shop || !clientId || !clientSecret) {
+    return res.status(500).json({
+      error: "Server configuration is incomplete"
+    });
   }
 
   try {
-    // 1. Find customer by email
+    const token = await getShopifyAccessToken(
+      shop,
+      clientId,
+      clientSecret
+    );
+
     const customerQuery = `
       query FindCustomer($query: String!) {
         customers(first: 1, query: $query) {
@@ -39,7 +50,8 @@ export default async function handler(req, res) {
       }
     );
 
-    const customer = customerResponse?.data?.customers?.nodes?.[0];
+    const customer =
+      customerResponse?.data?.customers?.nodes?.[0];
 
     if (!customer) {
       return res.status(404).json({
@@ -47,25 +59,34 @@ export default async function handler(req, res) {
       });
     }
 
-    // 2. Require at least one previous order
     if (Number(customer.numberOfOrders || 0) < 1) {
       return res.status(403).json({
-        error: "This offer is available to existing customers with a previous order."
+        error:
+          "This offer is available to existing customers with a previous order."
       });
     }
 
-    // 3. Create dates
     const startsAt = new Date();
-    const endsAt = new Date(startsAt.getTime() + 15 * 24 * 60 * 60 * 1000);
 
-    // 4. Generate unique discount code
-    const randomPart = crypto.randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase();
+    const endsAt = new Date(
+      startsAt.getTime() + 15 * 24 * 60 * 60 * 1000
+    );
+
+    const randomPart = crypto
+      .randomUUID()
+      .replace(/-/g, "")
+      .slice(0, 8)
+      .toUpperCase();
+
     const discountCode = `HM5-${randomPart}`;
 
-    // 5. Create 5% discount restricted to this customer
     const mutation = `
-      mutation CreateDiscount($basicCodeDiscount: DiscountCodeBasicInput!) {
-        discountCodeBasicCreate(basicCodeDiscount: $basicCodeDiscount) {
+      mutation CreateDiscount(
+        $basicCodeDiscount: DiscountCodeBasicInput!
+      ) {
+        discountCodeBasicCreate(
+          basicCodeDiscount: $basicCodeDiscount
+        ) {
           codeDiscountNode {
             id
           }
@@ -83,11 +104,13 @@ export default async function handler(req, res) {
         code: discountCode,
         startsAt: startsAt.toISOString(),
         endsAt: endsAt.toISOString(),
+
         customerSelection: {
           customers: {
             add: [customer.id]
           }
         },
+
         customerGets: {
           value: {
             percentage: 0.05
@@ -96,6 +119,7 @@ export default async function handler(req, res) {
             all: true
           }
         },
+
         usageLimit: 1,
         appliesOncePerCustomer: true
       }
@@ -108,7 +132,8 @@ export default async function handler(req, res) {
       variables
     );
 
-    const result = discountResponse?.data?.discountCodeBasicCreate;
+    const result =
+      discountResponse?.data?.discountCodeBasicCreate;
 
     if (result?.userErrors?.length) {
       console.error(result.userErrors);
@@ -127,12 +152,69 @@ export default async function handler(req, res) {
     console.error(error);
 
     return res.status(500).json({
-      error: "Something went wrong while activating your offer."
+      error:
+        "Something went wrong while activating your offer."
     });
   }
 }
 
-async function shopifyGraphQL(shop, token, query, variables = {}) {
+async function getShopifyAccessToken(
+  shop,
+  clientId,
+  clientSecret
+) {
+  const now = Date.now();
+
+  if (
+    cachedToken &&
+    cachedTokenExpiresAt &&
+    now < cachedTokenExpiresAt - 5 * 60 * 1000
+  ) {
+    return cachedToken;
+  }
+
+  const response = await fetch(
+    `https://${shop}/admin/oauth/access_token`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type":
+          "application/x-www-form-urlencoded"
+      },
+      body: new URLSearchParams({
+        grant_type: "client_credentials",
+        client_id: clientId,
+        client_secret: clientSecret
+      })
+    }
+  );
+
+  const data = await response.json();
+
+  if (!response.ok || !data.access_token) {
+    console.error("Shopify authentication failed:", data);
+    throw new Error(
+      "Unable to authenticate with Shopify"
+    );
+  }
+
+  cachedToken = data.access_token;
+
+  const expiresInSeconds =
+    Number(data.expires_in) || 86400;
+
+  cachedTokenExpiresAt =
+    Date.now() + expiresInSeconds * 1000;
+
+  return cachedToken;
+}
+
+async function shopifyGraphQL(
+  shop,
+  token,
+  query,
+  variables = {}
+) {
   const response = await fetch(
     `https://${shop}/admin/api/2026-07/graphql.json`,
     {
@@ -151,7 +233,7 @@ async function shopifyGraphQL(shop, token, query, variables = {}) {
   const data = await response.json();
 
   if (!response.ok || data.errors) {
-    console.error(data);
+    console.error("Shopify GraphQL error:", data);
     throw new Error("Shopify API request failed");
   }
 
