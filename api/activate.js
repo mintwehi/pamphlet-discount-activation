@@ -2,7 +2,10 @@ let cachedToken = null;
 let cachedTokenExpiresAt = 0;
 
 export default async function handler(req, res) {
-  // Allow requests only from The Highland Mint storefront
+  // ======================================================
+  // CORS — ONLY ALLOW THE HIGHLAND MINT STOREFRONT
+  // ======================================================
+
   const allowedOrigins = [
     "https://www.highlandmint.com",
     "https://highlandmint.com"
@@ -30,6 +33,10 @@ export default async function handler(req, res) {
     });
   }
 
+  // ======================================================
+  // EMAIL VALIDATION
+  // ======================================================
+
   const email = String(req.body?.email || "")
     .trim()
     .toLowerCase();
@@ -40,12 +47,15 @@ export default async function handler(req, res) {
     });
   }
 
-  // Basic email validation
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return res.status(400).json({
       error: "Please enter a valid email address."
     });
   }
+
+  // ======================================================
+  // SHOPIFY ENVIRONMENT VARIABLES
+  // ======================================================
 
   const shop = process.env.SHOPIFY_STORE_DOMAIN;
   const clientId = process.env.SHOPIFY_CLIENT_ID;
@@ -60,9 +70,9 @@ export default async function handler(req, res) {
   }
 
   try {
-    // ---------------------------------------------------
-    // 1. Authenticate with Shopify
-    // ---------------------------------------------------
+    // ======================================================
+    // 1. AUTHENTICATE WITH SHOPIFY
+    // ======================================================
 
     const token = await getShopifyAccessToken(
       shop,
@@ -70,9 +80,9 @@ export default async function handler(req, res) {
       clientSecret
     );
 
-    // ---------------------------------------------------
-    // 2. Find Shopify customer
-    // ---------------------------------------------------
+    // ======================================================
+    // 2. FIND CUSTOMER BY EMAIL
+    // ======================================================
 
     const customerQuery = `
       query FindCustomer($query: String!) {
@@ -98,40 +108,41 @@ export default async function handler(req, res) {
     const customer =
       customerResponse?.data?.customers?.nodes?.[0];
 
+    // Generic message prevents customer-email enumeration.
+    const eligibilityError =
+      "We couldn't verify eligibility for this offer. Please confirm the email address used for your previous Highland Mint order.";
+
+    // Customer does not exist.
     if (!customer) {
-      return res.status(404).json({
-        error:
-          "We could not find a customer account with that email."
+      return res.status(403).json({
+        error: eligibilityError
       });
     }
 
-    // Extra safety:
-    // Ensure Shopify returned the exact email requested.
+    // Extra safety — ensure Shopify returned the exact email.
     if (
       String(customer.email || "").toLowerCase() !== email
     ) {
-      return res.status(404).json({
-        error:
-          "We could not find a customer account with that email."
+      return res.status(403).json({
+        error: eligibilityError
       });
     }
 
-    // ---------------------------------------------------
-    // 3. Verify previous purchase
-    // ---------------------------------------------------
+    // ======================================================
+    // 3. VERIFY PREVIOUS PURCHASE
+    // ======================================================
 
     if (Number(customer.numberOfOrders || 0) < 1) {
       return res.status(403).json({
-        error:
-          "This offer is available to existing customers with a previous order."
+        error: eligibilityError
       });
     }
 
-    // ---------------------------------------------------
-    // 4. Create a permanent identifier for this customer
-    // ---------------------------------------------------
+    // ======================================================
+    // 4. CREATE PERMANENT CUSTOMER IDENTIFIER
+    // ======================================================
 
-    // Example customer ID:
+    // Shopify customer ID example:
     // gid://shopify/Customer/123456789
 
     const customerNumericId =
@@ -140,9 +151,9 @@ export default async function handler(req, res) {
     const offerTitle =
       `Pamphlet 5% Offer - Customer ${customerNumericId}`;
 
-    // ---------------------------------------------------
-    // 5. Check whether customer already activated
-    // ---------------------------------------------------
+    // ======================================================
+    // 5. CHECK WHETHER CUSTOMER ALREADY ACTIVATED
+    // ======================================================
 
     const existingDiscountQuery = `
       query ExistingPamphletDiscount($query: String!) {
@@ -180,17 +191,16 @@ export default async function handler(req, res) {
     );
 
     const existingNodes =
-      existingResponse?.data?.codeDiscountNodes?.nodes ||
-      [];
+      existingResponse?.data?.codeDiscountNodes?.nodes || [];
 
     const existingDiscount = existingNodes.find(
       (node) =>
         node?.codeDiscount?.title === offerTitle
     )?.codeDiscount;
 
-    // ---------------------------------------------------
-    // 6. Customer already activated this offer
-    // ---------------------------------------------------
+    // ======================================================
+    // 6. CUSTOMER ALREADY ACTIVATED
+    // ======================================================
 
     if (existingDiscount) {
       const existingCode =
@@ -201,14 +211,13 @@ export default async function handler(req, res) {
         alreadyActivated: true,
         code: existingCode || null,
         expiresAt: existingDiscount.endsAt,
-        message:
-          "You have already activated this offer."
+        message: "You have already activated this offer."
       });
     }
 
-    // ---------------------------------------------------
-    // 7. Start the 15-day period NOW
-    // ---------------------------------------------------
+    // ======================================================
+    // 7. START THE 15-DAY PERIOD NOW
+    // ======================================================
 
     const startsAt = new Date();
 
@@ -217,9 +226,9 @@ export default async function handler(req, res) {
         15 * 24 * 60 * 60 * 1000
     );
 
-    // ---------------------------------------------------
-    // 8. Generate unique discount code
-    // ---------------------------------------------------
+    // ======================================================
+    // 8. GENERATE UNIQUE DISCOUNT CODE
+    // ======================================================
 
     const randomPart = crypto
       .randomUUID()
@@ -230,9 +239,9 @@ export default async function handler(req, res) {
     const discountCode =
       `HM5-${randomPart}`;
 
-    // ---------------------------------------------------
-    // 9. Create the Shopify discount
-    // ---------------------------------------------------
+    // ======================================================
+    // 9. CREATE SHOPIFY DISCOUNT
+    // ======================================================
 
     const createDiscountMutation = `
       mutation CreateDiscount(
@@ -276,12 +285,14 @@ export default async function handler(req, res) {
 
         endsAt: endsAt.toISOString(),
 
+        // Restrict this discount to this specific customer.
         customerSelection: {
           customers: {
             add: [customer.id]
           }
         },
 
+        // 5% off all eligible products.
         customerGets: {
           value: {
             percentage: 0.05
@@ -292,8 +303,10 @@ export default async function handler(req, res) {
           }
         },
 
+        // Code can only be redeemed once.
         usageLimit: 1,
 
+        // Additional Shopify customer-level protection.
         appliesOncePerCustomer: true
       }
     };
@@ -308,9 +321,9 @@ export default async function handler(req, res) {
     const result =
       discountResponse?.data?.discountCodeBasicCreate;
 
-    // ---------------------------------------------------
-    // 10. Handle Shopify errors
-    // ---------------------------------------------------
+    // ======================================================
+    // 10. HANDLE SHOPIFY ERRORS
+    // ======================================================
 
     if (result?.userErrors?.length) {
       console.error(
@@ -331,18 +344,18 @@ export default async function handler(req, res) {
       );
     }
 
-    // ---------------------------------------------------
-    // 11. Return successful activation
-    // ---------------------------------------------------
+    // ======================================================
+    // 11. SUCCESSFUL ACTIVATION
+    // ======================================================
 
     return res.status(200).json({
       success: true,
       alreadyActivated: false,
       code: discountCode,
       expiresAt: endsAt.toISOString(),
-      message:
-        "Your 5% offer has been activated."
+      message: "Your 5% offer has been activated."
     });
+
   } catch (error) {
     console.error(
       "Activation error:",
@@ -368,7 +381,7 @@ async function getShopifyAccessToken(
 ) {
   const now = Date.now();
 
-  // Reuse token while it is still valid.
+  // Reuse the token while it is still valid.
   if (
     cachedToken &&
     cachedTokenExpiresAt &&
