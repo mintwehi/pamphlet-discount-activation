@@ -112,14 +112,12 @@ export default async function handler(req, res) {
     const eligibilityError =
       "We couldn't verify eligibility for this offer. Please confirm the email address used for your previous Highland Mint order.";
 
-    // Customer does not exist.
     if (!customer) {
       return res.status(403).json({
         error: eligibilityError
       });
     }
 
-    // Extra safety — ensure Shopify returned the exact email.
     if (
       String(customer.email || "").toLowerCase() !== email
     ) {
@@ -142,14 +140,11 @@ export default async function handler(req, res) {
     // 4. CREATE PERMANENT CUSTOMER IDENTIFIER
     // ======================================================
 
-    // Shopify customer ID example:
-    // gid://shopify/Customer/123456789
-
     const customerNumericId =
       customer.id.split("/").pop();
 
     const offerTitle =
-      `Pamphlet 5% Offer - Customer ${customerNumericId}`;
+      `Pamphlet 10% Offer - Customer ${customerNumericId}`;
 
     // ======================================================
     // 5. CHECK WHETHER CUSTOMER ALREADY ACTIVATED
@@ -237,7 +232,7 @@ export default async function handler(req, res) {
       .toUpperCase();
 
     const discountCode =
-      `HM5-${randomPart}`;
+      `HM10-${randomPart}`;
 
     // ======================================================
     // 9. CREATE SHOPIFY DISCOUNT
@@ -292,14 +287,18 @@ export default async function handler(req, res) {
           }
         },
 
-        // 5% off all eligible products.
+        // 10% off only the Officially Licensed Sports Collectibles collection.
         customerGets: {
           value: {
-            percentage: 0.05
+            percentage: 0.10
           },
 
           items: {
-            all: true
+            collections: {
+              add: [
+                "gid://shopify/Collection/503374709032"
+              ]
+            }
           }
         },
 
@@ -353,7 +352,7 @@ export default async function handler(req, res) {
       alreadyActivated: false,
       code: discountCode,
       expiresAt: endsAt.toISOString(),
-      message: "Your 5% offer has been activated."
+      message: "Your 10% offer has been activated."
     });
 
   } catch (error) {
@@ -381,7 +380,6 @@ async function getShopifyAccessToken(
 ) {
   const now = Date.now();
 
-  // Reuse the token while it is still valid.
   if (
     cachedToken &&
     cachedTokenExpiresAt &&
